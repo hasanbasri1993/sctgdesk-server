@@ -595,11 +595,27 @@ impl RendezvousServer {
 
     async fn handle_register_pk(
         &mut self,
-        rk: RegisterPk,
+        mut rk: RegisterPk,
         addr: SocketAddr,
     ) -> Result<register_pk_response::Result, register_pk_response::Result> {
-        if rk.uuid.is_empty() || rk.pk.is_empty() {
+        if rk.uuid.is_empty() {
             return Err(INVALID_ID_FORMAT);
+        }
+        // A change-id request (client-side rename) sends no pk, since the crypto
+        // identity is unchanged; reuse the existing peer's stored pk when the
+        // uuid on file for old_id matches, instead of rejecting outright.
+        if rk.pk.is_empty() {
+            if !rk.old_id.is_empty() {
+                if let Some(old_peer) = self.pm.get(&rk.old_id).await {
+                    let old_peer = old_peer.read().await;
+                    if old_peer.uuid == rk.uuid {
+                        rk.pk = old_peer.pk.clone();
+                    }
+                }
+            }
+            if rk.pk.is_empty() {
+                return Err(INVALID_ID_FORMAT);
+            }
         }
         let id = rk.id;
         let ip = addr.ip().to_string();

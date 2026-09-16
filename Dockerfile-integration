@@ -48,18 +48,10 @@ RUN --mount=type=tmpfs,target=/root/.cargo export TARGET=$(cat /build/_target) \
     && cp /build/target/$(cat /build/_target)/release/hbbr /build/ubuntu-jammy/bin/ \
     && cp /build/target/$(cat /build/_target)/release/hbbs /build/ubuntu-jammy/bin/ \
     && cp /build/target/$(cat /build/_target)/release/rustdesk-utils /build/ubuntu-jammy/bin/
-COPY systemd /build/ubuntu-jammy/systemd
-COPY debian /build/ubuntu-jammy/debian
-RUN cd /build/ubuntu-jammy \
-    && cat debian/control.tpl | sed "s/{{ ARCH }}/$(dpkg --print-architecture)/" > debian/control \
-    && rm debian/control.tpl \
-    && debuild -i -us -uc -b -a$(dpkg --print-architecture)
 COPY oauth2.toml /build/ubuntu-jammy/bin/oauth2.toml
 
 # Note ubuntu:jammy is the based on Debian:bookworm so the deb packages and the binaried are compatible
 FROM ubuntu:jammy
-RUN mkdir -p /usr/local/share/debpackages
-COPY --from=builder /build/*.deb /usr/local/share/debpackages
 COPY --from=builder /build/ubuntu-jammy/bin/hbbs /usr/local/bin/hbbs
 COPY --from=builder /build/ubuntu-jammy/bin/oauth2.toml /usr/local/bin/oauth2.toml
 COPY --from=builder /build/ubuntu-jammy/bin/hbbr /usr/local/bin/hbbr
