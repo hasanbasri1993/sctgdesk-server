@@ -160,7 +160,8 @@ pub struct CurrentUserRequest {
 
 #[derive(Serialize, Debug, JsonSchema)]
 pub struct CurrentUserResponse {
-    pub error: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     #[serde(flatten)]
     pub data: UserInfo,
 }
