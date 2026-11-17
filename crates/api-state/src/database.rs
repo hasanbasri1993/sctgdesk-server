@@ -41,7 +41,7 @@ use base64::prelude::{Engine as _, BASE64_STANDARD};
 use uuid::Uuid;
 
 pub struct Database {
-    pool: SqlitePool,
+    pub(crate) pool: SqlitePool,
 }
 
 pub struct DatabaseConnection {
@@ -116,6 +116,80 @@ impl Database {
             .await
             .unwrap();
         // Load and run migrations
+
+        // The sessions of the API server. A plain query and not db.sql: the sqlx macros check db.sql at
+        // compile time against a database that does not have this table yet.
+        for statement in [
+            "CREATE TABLE IF NOT EXISTS api_session (\
+                token_hash blob primary key not null, \
+                user blob not null, \
+                created_at datetime not null default(current_timestamp)) without rowid",
+            "CREATE INDEX IF NOT EXISTS index_api_session_user ON api_session (user)",
+        ] {
+            sqlx::query(statement).execute(&mut *conn).await.unwrap();
+        }
+    }
+
+    /// Sessions older than this are forgotten.
+    const SESSION_LIFETIME_DAYS: i64 = 90;
+
+    fn token_hash(token: &utils::Token) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(token.to_base64().as_bytes()).to_vec()
+    }
+
+    /// Remembers a session across restarts (a hash of the token is stored, not the token).
+    pub async fn save_session(&self, token: &utils::Token, user_id: &UserId) {
+        let res =
+            sqlx::query("INSERT OR REPLACE INTO api_session (token_hash, user) VALUES (?, ?)")
+                .bind(Self::token_hash(token))
+                .bind(user_id.clone())
+                .execute(&self.pool)
+                .await;
+        if let Err(e) = res {
+            log::error!("cannot save the session: {}", e);
+        }
+    }
+
+    pub async fn delete_session(&self, token: &utils::Token) {
+        let res = sqlx::query("DELETE FROM api_session WHERE token_hash = ?")
+            .bind(Self::token_hash(token))
+            .execute(&self.pool)
+            .await;
+        if let Err(e) = res {
+            log::error!("cannot delete the session: {}", e);
+        }
+    }
+
+    pub async fn purge_old_sessions(&self) {
+        let res = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM api_session WHERE created_at < datetime('now', '-{} days')",
+            Self::SESSION_LIFETIME_DAYS
+        )))
+        .execute(&self.pool)
+        .await;
+        if let Err(e) = res {
+            log::error!("cannot purge the old sessions: {}", e);
+        }
+    }
+
+    /// The user of a remembered session, if the session and its (active) user still exist:
+    /// (user id, name, admin).
+    pub async fn find_session_user(&self, token: &utils::Token) -> Option<(UserId, String, bool)> {
+        use sqlx::Row;
+        let row = sqlx::query(
+            "SELECT u.guid, u.name, u.role FROM api_session s JOIN user u ON u.guid = s.user \
+             WHERE s.token_hash = ? AND u.status = 1",
+        )
+        .bind(Self::token_hash(token))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| log::error!("cannot read the session: {}", e))
+        .ok()??;
+        let guid: Vec<u8> = row.try_get(0).ok()?;
+        let name: String = row.try_get(1).ok()?;
+        let role: i64 = row.try_get(2).ok()?;
+        Some((guid, name, role == 1))
     }
 
     pub async fn find_user_by_name(
@@ -1108,6 +1182,25 @@ impl Database {
         Some(())
     }
 
+    /// Writes a consistent copy of the database to `path`, which must not exist (`VACUUM INTO`): safe while
+    /// the server runs, and the copy has no `-wal` file.
+    pub async fn backup_to(&self, path: &Path) -> Result<(), sqlx::Error> {
+        sqlx::query("VACUUM INTO ?")
+            .bind(path.to_string_lossy().into_owned())
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+    }
+
+    /// Runs `SELECT 1`, bounded to 2 seconds.
+    pub async fn ping(&self) -> bool {
+        let query = sqlx::query("SELECT 1").execute(&self.pool);
+        matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), query).await,
+            Ok(Ok(_))
+        )
+    }
+
     pub async fn get_all_users(
         &self,
         name: Option<&str>,
@@ -1236,7 +1329,7 @@ impl Database {
         query.push_str(" WHERE guid = ?");
 
         log::debug!("query: {:?}", query);
-        let mut res = sqlx::query(&query);
+        let mut res = sqlx::query(sqlx::AssertSqlSafe(query));
         for param in query_params {
             res = res.bind(param);
         }
@@ -1312,6 +1405,7 @@ impl Database {
         .ok()?;
         let mut groups: Vec<Group> = Vec::new();
         for row in res {
+            let (access_to, accessed_from) = self.get_group_access(&row.guid).await;
             let guid = guid_into_uuid(row.guid).unwrap_or("".to_string());
             let team = guid_into_uuid(row.team).unwrap_or("".to_string());
             groups.push(Group {
@@ -1320,8 +1414,8 @@ impl Database {
                 team: team,
                 note: row.note,
                 created_at: row.created_at.into(),
-                access_to: Vec::<String>::new(),
-                accessed_from: Vec::<String>::new(),
+                access_to,
+                accessed_from,
                 info: row.info,
             });
         }
@@ -1442,11 +1536,10 @@ impl Database {
         let mut ab_rules = Vec::new();
         for row in res {
             let uuid = guid_into_uuid(row.guid).unwrap_or("".to_string());
-            let user = row.username;
-            let group = row.groupname;
             let ab_rule = AbRule {
-                user: Some(user),
-                group: Some(group),
+                // LEFT JOINs: a rule of a user has no group, and the other way round
+                user: row.username,
+                group: row.groupname,
                 rule: row.rule as u32,
                 guid: uuid,
             };
@@ -1635,6 +1728,7 @@ impl Database {
             return None;
         }
         let res = res.unwrap();
+        let (access_to, accessed_from) = self.get_group_access(&group_guid).await;
         let guid = guid_into_uuid(res.guid).unwrap_or("".to_string());
         let team = guid_into_uuid(res.team).unwrap_or("".to_string());
         Some(Group {
@@ -1643,8 +1737,8 @@ impl Database {
             team: team,
             note: res.note,
             created_at: res.created_at.into(),
-            access_to: Vec::<String>::new(),
-            accessed_from: Vec::<String>::new(),
+            access_to,
+            accessed_from,
             info: res.info,
         })
     }
@@ -1753,6 +1847,11 @@ impl Database {
             log::error!("delete_group error: {:?}", res);
             return None;
         }
+        let _ = sqlx::query("DELETE FROM grp_access WHERE src = ? OR dst = ?")
+            .bind(&group_guid)
+            .bind(&group_guid)
+            .execute(&mut *conn)
+            .await;
         Some(())
     }
 
@@ -1835,6 +1934,255 @@ impl Database {
             log::error!("update_shared_address_book error: {:?}", res);
             return None;
         }
+        Some(())
+    }
+
+    // ---- Access control -------------------------------------------------------------------------------------------
+
+    /// What a user may do with an address book: 0 nothing, 1 read, 2 read and write, 3 everything (rules,
+    /// deletion). The owner has everything; a personal address book is for its owner only; a shared one is
+    /// as open as the highest rule given to the user or to the group of the user.
+    pub async fn get_ab_access(&self, user_id: &UserId, ab: &str) -> u32 {
+        use sqlx::Row;
+        let ab_guid = match Uuid::parse_str(ab) {
+            Ok(guid) => guid.as_bytes().to_vec(),
+            Err(_) => return 0,
+        };
+        let mut conn = self.pool.acquire().await.unwrap();
+        let row = sqlx::query("SELECT owner, personal FROM ab WHERE guid = ?")
+            .bind(&ab_guid)
+            .fetch_optional(&mut *conn)
+            .await;
+        let row = match row {
+            Ok(Some(row)) => row,
+            _ => return 0,
+        };
+        let owner: Vec<u8> = row.get("owner");
+        if &owner == user_id {
+            return 3;
+        }
+        let personal: i64 = row.get("personal");
+        if personal != 0 {
+            return 0;
+        }
+        let rule: Result<Option<i64>, _> = sqlx::query_scalar(
+            r#"SELECT MAX(rule) FROM ab_rule
+               WHERE ab = ? AND ("user" = ? OR grp = (SELECT grp FROM "user" WHERE guid = ?))"#,
+        )
+        .bind(&ab_guid)
+        .bind(user_id)
+        .bind(user_id)
+        .fetch_one(&mut *conn)
+        .await;
+        match rule {
+            Ok(Some(rule)) => rule.clamp(0, 3) as u32,
+            _ => 0,
+        }
+    }
+
+    /// The groups a user may see and reach: its own, and those its group is allowed to connect to.
+    pub async fn get_accessible_groups(&self, user_id: &UserId) -> Vec<Vec<u8>> {
+        use sqlx::Row;
+        let mut conn = self.pool.acquire().await.unwrap();
+        let res = sqlx::query(
+            r#"SELECT grp AS guid FROM "user" WHERE guid = ?
+               UNION
+               SELECT dst AS guid FROM grp_access
+               WHERE src = (SELECT grp FROM "user" WHERE guid = ?)"#,
+        )
+        .bind(user_id)
+        .bind(user_id)
+        .fetch_all(&mut *conn)
+        .await;
+        match res {
+            Ok(rows) => rows
+                .iter()
+                .map(|row| row.get::<Vec<u8>, _>("guid"))
+                .collect(),
+            Err(e) => {
+                log::error!("get_accessible_groups error: {:?}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// The names of the groups a user may see and reach, see `get_accessible_groups`.
+    pub async fn get_accessible_group_names(&self, user_id: &UserId) -> Vec<String> {
+        use sqlx::Row;
+        let groups = self.get_accessible_groups(user_id).await;
+        let mut conn = self.pool.acquire().await.unwrap();
+        let mut names = Vec::new();
+        for guid in groups {
+            let name = sqlx::query("SELECT name FROM grp WHERE guid = ?")
+                .bind(&guid)
+                .fetch_optional(&mut *conn)
+                .await;
+            if let Ok(Some(row)) = name {
+                names.push(row.get::<String, _>("name"));
+            }
+        }
+        names
+    }
+
+    /// The peers of the users that are in `groups`, or that are `user_id`.
+    pub async fn get_peers_of_groups(
+        &self,
+        user_id: &UserId,
+        groups: &[Vec<u8>],
+    ) -> Option<Vec<Peer>> {
+        use sqlx::Row;
+        let marks = vec!["?"; groups.len()].join(",");
+        let sql = format!(
+            r#"SELECT guid, id, status, info, last_online FROM peer
+               WHERE "user" = ? OR "user" IN (SELECT guid FROM "user" WHERE grp IN ({}))"#,
+            if groups.is_empty() {
+                "NULL"
+            } else {
+                marks.as_str()
+            }
+        );
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(user_id);
+        for group in groups {
+            query = query.bind(group);
+        }
+        let mut conn = self.pool.acquire().await.unwrap();
+        let rows = query.fetch_all(&mut *conn).await.ok()?;
+        let mut peers = Vec::new();
+        for row in rows {
+            let info: String = row.get("info");
+            let peer_info = match serde_json::from_str::<utils::PeerInfo>(&info) {
+                Ok(peer_info) => peer_info,
+                Err(e) => {
+                    log::error!("get_peers_of_groups error: {:?}", e);
+                    return None;
+                }
+            };
+            let last_online: String = row.get("last_online");
+            peers.push(Peer {
+                id: row.get("id"),
+                guid: guid_into_uuid(row.get::<Vec<u8>, _>("guid")).unwrap_or_default(),
+                info: peer_info,
+                last_online: last_online.into(),
+                status: row.get::<i64, _>("status") as i32,
+                strategy_name: "-".to_string(),
+            });
+        }
+        Some(peers)
+    }
+
+    /// Remembers that `username` is logged in on the device `device_id`: the device then belongs to that user, and
+    /// is shown to the users that may reach the group of that user.
+    pub async fn set_peer_owner(&self, username: &str, device_id: &str) {
+        if device_id.is_empty() {
+            return;
+        }
+        let mut conn = self.pool.acquire().await.unwrap();
+        let res = sqlx::query(
+            r#"UPDATE peer SET "user" = (SELECT guid FROM "user" WHERE name = ?) WHERE id = ?"#,
+        )
+        .bind(username)
+        .bind(device_id)
+        .execute(&mut *conn)
+        .await;
+        if let Err(e) = res {
+            log::error!("set_peer_owner error: {:?}", e);
+        }
+    }
+
+    /// The groups a group may connect to (`outgoing`) and the groups that may connect to it (`incoming`), as uuids.
+    pub async fn get_group_access(&self, guid: &[u8]) -> (Vec<String>, Vec<String>) {
+        (
+            self.read_group_links("SELECT dst AS guid FROM grp_access WHERE src = ?", guid)
+                .await,
+            self.read_group_links("SELECT src AS guid FROM grp_access WHERE dst = ?", guid)
+                .await,
+        )
+    }
+
+    async fn read_group_links(&self, sql: &'static str, guid: &[u8]) -> Vec<String> {
+        use sqlx::Row;
+        let mut conn = self.pool.acquire().await.unwrap();
+        match sqlx::query(sql).bind(guid).fetch_all(&mut *conn).await {
+            Ok(rows) => rows
+                .iter()
+                .filter_map(|row| guid_into_uuid(row.get::<Vec<u8>, _>("guid")))
+                .collect(),
+            Err(e) => {
+                log::error!("read_group_links error: {:?}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// An existing group from a uuid or a name.
+    pub async fn resolve_group(&self, entry: &str) -> Option<Vec<u8>> {
+        use sqlx::Row;
+        let mut conn = self.pool.acquire().await.unwrap();
+        let row = match Uuid::parse_str(entry) {
+            Ok(uuid) => {
+                sqlx::query("SELECT guid FROM grp WHERE guid = ?")
+                    .bind(uuid.as_bytes().to_vec())
+                    .fetch_optional(&mut *conn)
+                    .await
+            }
+            Err(_) => {
+                sqlx::query("SELECT guid FROM grp WHERE name = ?")
+                    .bind(entry)
+                    .fetch_optional(&mut *conn)
+                    .await
+            }
+        };
+        row.ok().flatten().map(|row| row.get::<Vec<u8>, _>("guid"))
+    }
+
+    /// Replaces the access of a group: the groups it may connect to and the groups that may connect to it.
+    /// Entries are uuids or names of existing groups; the others, and the group itself, are ignored.
+    pub async fn set_group_access(
+        &self,
+        guid: &[u8],
+        outgoing: &[String],
+        incoming: &[String],
+    ) -> Option<()> {
+        let mut dst_guids = Vec::new();
+        for entry in outgoing {
+            if let Some(found) = self.resolve_group(entry).await {
+                if found != guid {
+                    dst_guids.push(found);
+                }
+            }
+        }
+        let mut src_guids = Vec::new();
+        for entry in incoming {
+            if let Some(found) = self.resolve_group(entry).await {
+                if found != guid {
+                    src_guids.push(found);
+                }
+            }
+        }
+        let mut tx = self.pool.begin().await.ok()?;
+        sqlx::query("DELETE FROM grp_access WHERE src = ? OR dst = ?")
+            .bind(guid)
+            .bind(guid)
+            .execute(&mut *tx)
+            .await
+            .ok()?;
+        for dst in dst_guids {
+            sqlx::query("INSERT OR IGNORE INTO grp_access (src, dst) VALUES (?, ?)")
+                .bind(guid)
+                .bind(dst)
+                .execute(&mut *tx)
+                .await
+                .ok()?;
+        }
+        for src in src_guids {
+            sqlx::query("INSERT OR IGNORE INTO grp_access (src, dst) VALUES (?, ?)")
+                .bind(src)
+                .bind(guid)
+                .execute(&mut *tx)
+                .await
+                .ok()?;
+        }
+        tx.commit().await.ok()?;
         Some(())
     }
 }

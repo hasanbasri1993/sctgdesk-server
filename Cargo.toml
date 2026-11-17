@@ -1,6 +1,6 @@
 [package]
 name = "hbbs"
-version = "1.1.16-sctg.2"
+version = "1.1.16-sctg.6"
 authors = ["sctg <sctgdesk@k-cloud.pp.ua>", "rustdesk <info@rustdesk.com>"]
 edition = "2021"
 build = "build.rs"
@@ -30,8 +30,8 @@ mac_address = "1.1"
 whoami = "1.5"
 base64 = "0.22"
 axum = { version = "0.5", features = ["headers"] }
-sqlx = { version = "0.8", features = [
-    "runtime-tokio-rustls",
+sqlx = { version = "0.9", features = [
+    "runtime-tokio",
     "sqlite",
     "macros",
     "chrono",
@@ -59,9 +59,12 @@ ping = "0.5"
 sctgdesk-api-server = { path = "crates/api-server" }
 flate2 = "1.0"
 
-rocket = { version = "0.5", features = ["json", "secrets"] }
+rocket = { version = "0.5", default-features = false, features = ["json", "secrets"] }
 num_cpus = "1.16"
 
+
+[dev-dependencies]
+tar = "0.4"
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 # https://github.com/rustdesk/rustdesk-server-pro/issues/189, using native-tls for better tls support

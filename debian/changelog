@@ -1,3 +1,27 @@
+rustdesk-server (1.1.16-sctg.5) UNRELEASED; urgency=medium
+
+  * fix: a failed login answers a JSON error body, which the clients can read
+  * the Rocket secret key is generated at the first start (secret_key.txt or ROCKET_SECRET_KEY) instead of being one constant of the source
+  * /livez and /readyz probes on hbbs, and on hbbr with HEALTH_PORT; optional probes in the Helm chart
+  * dependencies updated: 30 security advisories down to 4, listed with their reason; cargo audit is blocking in the CI
+  * the client is built on upstream RustDesk 1.5.3, and its Apple Silicon build on Flutter 3.44.9
+
+rustdesk-server (1.1.16-sctg.4) UNRELEASED; urgency=medium
+
+  * fix: users only reach the address books their rights allow, and only see the users, groups and devices of their group and of the groups it may connect to
+  * fix: a user can no longer make itself an administrator
+  * the groups store the groups they may connect to
+  * history of the connections, with a note on each, in the API and the console
+  * releases are published by a pipeline: image, packages, binaries and clients
+
+rustdesk-server (1.1.16-sctg.3) UNRELEASED; urgency=medium
+
+  * fix: sessions survive a restart of hbbs (stored in the database), and the group endpoint answers the Flutter client
+  * fix: currentUser no longer answers with an error key, which the Flutter client took for a failure
+  * the web client: OAuth2 login, access token read for the rendezvous request, API server and device info stubs
+  * the native client settings link points to the project instead of rustdesk.com
+  * deb and rpm packages (amd64, arm64) from static musl binaries, built by a manual workflow
+
 rustdesk-server (1.1.16-sctg.2) UNRELEASED; urgency=medium
 
   * fix: a request with a malformed bearer token no longer aborts hbbs

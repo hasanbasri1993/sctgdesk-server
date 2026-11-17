@@ -79,9 +79,8 @@ impl OpenApiResponderInner for ActionResponse {
 
 /// A `401 Unauthorized` response that carries a JSON body `{"error":"<message>"}`.
 ///
-/// RustDesk clients always `jsonDecode` the body of the login reply, so an empty
-/// 401 body ends up as "FormatException: Unexpected end of input" instead of the
-/// real reason (e.g. wrong password).
+/// The RustDesk clients always `jsonDecode` the body of the login reply: with an
+/// empty body they show "Unexpected end of input" instead of the reason.
 #[derive(Debug, JsonSchema)]
 pub struct UnauthorizedError(pub String);
 

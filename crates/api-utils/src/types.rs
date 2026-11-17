@@ -159,9 +159,9 @@ pub struct CurrentUserRequest {
 }
 
 #[derive(Serialize, Debug, JsonSchema)]
+/// The client reads this body as a flat user payload and treats any `error` key,
+/// even `false`, as a failure: do not add one.
 pub struct CurrentUserResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
     #[serde(flatten)]
     pub data: UserInfo,
 }
@@ -714,6 +714,18 @@ pub struct GroupsResponse {
     pub data: Vec<Group>,
 }
 
+/// A device group as the clients list it (`GET /api/device-group/accessible`).
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+pub struct DeviceGroupPayload {
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+pub struct DeviceGroupsResponse {
+    pub total: u32,
+    pub data: Vec<DeviceGroupPayload>,
+}
+
 pub type GroupInfo = String;
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 pub struct Group {
@@ -802,4 +814,53 @@ pub struct AbSharedNameRequest {
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 pub struct DeleteUserRequest {
     pub rows: Vec<String>,
+}
+
+/// What a device posts to `/api/audit/conn`. All the fields are optional: the device sends a few of them per event.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct AuditConnEvent {
+    /// the controlled device
+    pub id: Option<String>,
+    pub conn_id: Option<i64>,
+    pub session_id: Option<u64>,
+    /// `new` or `close`
+    pub action: Option<String>,
+    pub ip: Option<String>,
+    /// the controlling device: its id and its name
+    pub peer: Option<Vec<String>>,
+    /// 0 remote, 1 file transfer, 2 port forward, 3 camera, 4 terminal
+    #[serde(rename = "type")]
+    pub conn_type: Option<i32>,
+    pub note: Option<String>,
+    /// unique per post: a retried post is applied once
+    pub nonce: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AuditConnRecord {
+    pub guid: String,
+    pub device_id: String,
+    pub device_name: Option<String>,
+    pub controller_id: Option<String>,
+    pub controller_name: Option<String>,
+    /// the account that controlled, when the client gave it
+    pub user: Option<String>,
+    pub conn_type: i32,
+    pub ip: Option<String>,
+    pub note: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AuditNoteRequest {
+    /// the guid of the record, as given by `/api/audit/conn/active` or listed by `/api/audit/conn`
+    pub guid: String,
+    pub note: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AuditConnList {
+    pub total: u32,
+    pub data: Vec<AuditConnRecord>,
 }

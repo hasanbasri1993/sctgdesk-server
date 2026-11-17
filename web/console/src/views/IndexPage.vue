@@ -125,6 +125,12 @@ This website use:
       <div v-if="isCurrentPage('Address books')" class="mx-auto max-w-7xl py-6 sm:px-6 lg:px-8">
         <AccessibleAddressBooks />
       </div>
+      <div v-if="isCurrentPage('Backup')" class="mx-auto max-w-7xl py-6 sm:px-6 lg:px-8">
+        <BackupCard />
+      </div>
+      <div v-if="isCurrentPage('Connections')" class="mx-auto max-w-7xl py-6 sm:px-6 lg:px-8">
+        <ConnectionsCard />
+      </div>
     </main>
     <MainFooter />
   </div>
@@ -145,6 +151,8 @@ import MainFooter from '@/footers/mainfooter.vue';
 import { ref } from 'vue';
 import GroupsCard from '@/components/GroupsCard.vue';
 import AccessibleAddressBooks from '@/components/AccessibleAddressBooks.vue';
+import ConnectionsCard from '@/components/ConnectionsCard.vue';
+import BackupCard from '@/components/BackupCard.vue';
 const userStore = useUserStore();
 const router = useRouter();
 
@@ -160,6 +168,9 @@ const navigation = ref([
   { name: 'Users', href: '#', current: false },
   { name: 'Groups', href: '#', current: false },
   { name: 'Address books', href: '#', current: false },
+  { name: 'Connections', href: '#', current: false },
+  // the backup is for the administrators (the server refuses the others anyway)
+  ...(userStore.user?.admin ? [{ name: 'Backup', href: '#', current: false }] : []),
 ])
 const userNavigation = [
   { name: `${userStore.user?.name} ${userStore.user?.email}`, href: '#', action: nop },
